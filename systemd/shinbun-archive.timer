@@ -1,0 +1,15 @@
+# shinbun-archive.timer — the morning edition pull, heavily jittered.
+# RandomizedDelaySec=6h: a fleet of readers all fetching at 05:30:00 sharp
+# is a herd, and a fixed daily fetch time is a fingerprint — the pull lands
+# somewhere in the morning instead. Persistent=true catches up a missed run
+# (laptop asleep at 05:30) on next boot.
+[Unit]
+Description=shinbun daily edition pull (jittered)
+
+[Timer]
+OnCalendar=*-*-* 05:30:00
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

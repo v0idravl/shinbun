@@ -1,0 +1,11 @@
+# shinbun-archive.service — pull the daily edition, once, over tor.
+# --strict: an unattended pull fails CLOSED — tor down means no edition
+# today and a retry tomorrow, never a silent clearnet fetch.
+# Install: cp to ~/.config/systemd/user/, then
+#   systemctl --user enable --now shinbun-archive.timer
+[Unit]
+Description=shinbun: pull the daily news edition over tor
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/shinbun --archive --strict
