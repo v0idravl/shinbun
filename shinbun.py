@@ -31,7 +31,7 @@ is deliberate clearnet and stays silent. The pulls BLEND IN: the UA is a
 stock Firefox ESR string (Tor Browser's own blend value — a custom UA would
 fingerprint every fetch), no cookies, no JS, only the text comes back.
 
-Traffic budget: exactly 4 GETs per edition pull (one per source), text only —
+Traffic budget: exactly 6 GETs per edition pull (one per source), text only —
 subresources and images are never fetched. The pulls are anti-fingerprint
 shaped: fetch order is shuffled per run (secrets Fisher-Yates) and between
 fetches the pull sleeps a secrets-random FETCH_GAP_MIN..MAX seconds, so the
@@ -42,10 +42,15 @@ Sources, all keyless and rendered locally:
   NPR             text.npr.org index — headlines, each with its short code
                   right-locked to col 80 (the --read handle).
   WORLD           Al Jazeera RSS — top 15 title/link pairs.
+  DEUTSCHE WELLE  DW world RSS — top 10 title/link pairs.
+  UN NEWS         UN News RSS — top 10 title/link pairs.
   HACKER NEWS     hnrss.org frontpage RSS — top 20 title/link pairs.
   CURRENT EVENTS  Wikipedia Portal:Current events via action=render (no skin),
                   rendered by the built-in TextRenderer, trimmed to the news,
-                  each daily date heading wrapped in a yellow rule.
+                  each daily date heading wrapped in a yellow rule, each
+                  subsection (Armed conflicts and attacks, …) an unbulleted
+                  head line, and each blurb's category chain collapsed to a
+                  "  A › B " breadcrumb with the blurb bulleted under it.
 
 Format: a NerdFont masthead + section rules in bold ANSI named colors
 (16-color, so they track terminal palette themes); bodies stay plain text so
@@ -57,6 +62,7 @@ parts; tests additionally patch http_get() and sleep().
 """
 
 import argparse
+import gzip
 import html.parser
 import os
 import re
@@ -85,6 +91,8 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) "
 NPR_BASE = "https://text.npr.org"
 HN_FEED = "https://hnrss.org/frontpage?points=100"
 AJ_FEED = "https://www.aljazeera.com/xml/rss/all.xml"
+DW_FEED = "https://rss.dw.com/xml/rss-en-world"
+UN_FEED = "https://news.un.org/feed/subscribe/en/news/all/rss.xml"
 # action=render returns only the article content HTML; the /wiki/ URL drags
 # the whole Wikipedia skin (sidebar, tools, footer) into the render.
 PORTAL_URL = ("https://en.wikipedia.org/w/index.php"
@@ -92,12 +100,14 @@ PORTAL_URL = ("https://en.wikipedia.org/w/index.php"
 
 HN_ITEMS = 20
 AJ_ITEMS = 15
+DW_ITEMS = 10
+UN_ITEMS = 10
 MAX_REDIRECTS = 5
 HTTP_TIMEOUT = 60
 # inter-request gap (seconds): a secrets-random 5–120 s between fetches, on
-# top of the per-run fetch-order shuffle — the four GETs should read as
+# top of the per-run fetch-order shuffle — the six GETs should read as
 # unrelated visits, not one burst. Wide enough to matter, small enough that
-# a manual --archive never waits more than ~6 minutes total.
+# a manual --archive never waits more than ~12 minutes total.
 FETCH_GAP_MIN = 5
 FETCH_GAP_MAX = 120
 
@@ -323,9 +333,10 @@ def http_get(url, redirects=MAX_REDIRECTS):
     """THE one choke point for every byte the program fetches.
 
     Minimal HTTP/1.1 over the tor SOCKS port (or direct, per the decided
-    ROUTE): identity encoding only, Connection: close, the blend-in UA, ≤5
+    ROUTE): gzip content-encoding decoded (some CDNs force it even without
+    an Accept-Encoding), Connection: close, the blend-in UA, ≤5
     redirects, body decoded as UTF-8 with replacement. Subresources and
-    images are never fetched — the traffic budget is 4 GETs per edition.
+    images are never fetched — the traffic budget is 6 GETs per edition.
     """
     parts = urlsplit(url)
     scheme = parts.scheme or "https"
@@ -343,6 +354,7 @@ def http_get(url, redirects=MAX_REDIRECTS):
                    f"Host: {host}\r\n"
                    f"User-Agent: {UA}\r\n"
                    f"Accept: */*\r\n"
+                   f"Accept-Encoding: gzip\r\n"
                    f"Connection: close\r\n\r\n")
         sock.sendall(request.encode("ascii"))
         f = sock.makefile("rb")
@@ -372,6 +384,10 @@ def http_get(url, redirects=MAX_REDIRECTS):
             body = _read_chunked(f)
         else:
             body = f.read()  # Connection: close — read to EOF
+        # transfer-encoding first, content-encoding second — a gzipped body
+        # (some CDNs force it regardless of Accept-Encoding) is still text
+        if headers.get("content-encoding", "").lower() == "gzip":
+            body = gzip.decompress(body)
     finally:
         if sock is not None:
             sock.close()
@@ -395,25 +411,53 @@ class TextRenderer(html.parser.HTMLParser):
     """A poor man's `w3m -dump`, built on html.parser.
 
     Block-level tags break lines, <li> gets a "- " bullet with a hanging
-    indent, script/style content is skipped, runs of ASCII whitespace
-    collapse (NBSP is deliberately preserved — the portal's date headings
-    use it, and day_separators() normalizes it at match time), and each
-    block is wrapped to WIDTH. convert_charrefs delivers entities already
-    unescaped.
+    indent, and list NESTING indents: an <li> inside a second-level <ul>
+    renders as "  - ". With subsections=True (the portal) the rendering
+    follows the portal's actual structure: a standalone fully-bold block
+    — the portal marks its subsection heads ("Armed conflicts and
+    attacks", …) as <p><b>Name</b></p>, NOT as a list item — renders as
+    an unbulleted head line; an <li> that carries a nested <ul> is a
+    CATEGORY node, never news (the chains run up to four deep before any
+    blurb: "Middle Eastern crisis > Yemeni civil war > 2026 Yemen
+    offensive > …"), so its label becomes breadcrumb context instead of
+    a bullet of its own — one "  A › B › C" line per group, with the
+    leaf blurbs as "  - " bullets under it. script/style content is
+    skipped, runs of ASCII whitespace collapse (NBSP is deliberately
+    preserved — the portal's date headings use it, and day_separators()
+    normalizes it at match time), and each block is wrapped to WIDTH.
+    convert_charrefs delivers entities already unescaped.
     """
 
-    def __init__(self):
+    def __init__(self, subsections=False):
         super().__init__(convert_charrefs=True)
-        self.blocks = []  # (is_bullet, text)
+        self.blocks = []  # (list depth, text, breadcrumb chain)
         self.buf = []
+        self.bold_buf = []  # the subset of buf seen inside <b>/<strong>
         self.bullet = False
+        self.depth = 0  # ul/ol nesting, 1-based at the first list
+        self.bold = 0
         self.skip = 0
+        self.subsections = subsections
+        self.chain = []  # (list depth, label) of open category nodes
 
     def _flush(self):
         text = re.sub(r"[ \t\r\n\f\v]+", " ", "".join(self.buf)).strip()
-        if text:
-            self.blocks.append((self.bullet, text))
+        bold = re.sub(r"[ \t\r\n\f\v]+", " ", "".join(self.bold_buf)).strip()
         self.buf = []
+        self.bold_buf = []
+        if text:
+            if self.subsections:
+                if not self.bullet and self.depth == 0 and text == bold:
+                    # <p><b>Head</b></p> -> unbulleted head line
+                    self.blocks.append((0, text, ()))
+                elif self.bullet:
+                    self.blocks.append((1, text, tuple(
+                        label for _, label in self.chain)))
+                else:
+                    self.blocks.append((0, text, ()))
+            else:
+                self.blocks.append(
+                    (self.depth if self.bullet else 0, text, ()))
         self.bullet = False
 
     def handle_starttag(self, tag, attrs):
@@ -422,10 +466,30 @@ class TextRenderer(html.parser.HTMLParser):
             return
         if self.skip:
             return
+        if tag in ("ul", "ol"):
+            # a nested list opening inside an <li> with text makes that li
+            # a category node: keep its label as breadcrumb context for
+            # the blurbs below instead of emitting it as a bullet
+            if self.subsections and self.bullet:
+                label = re.sub(r"[ \t\r\n\f\v]+", " ",
+                               "".join(self.buf)).strip()
+                self.buf = []
+                self.bold_buf = []
+                self.bullet = False
+                if label:
+                    self.chain.append((self.depth, label))
+            else:
+                self._flush()
+            self.depth += 1
+            return
         if tag in BLOCK_TAGS:
             self._flush()
         if tag == "li":
+            # a sibling li ends the category labels of deeper/eq levels
+            self.chain = [e for e in self.chain if e[0] < self.depth]
             self.bullet = True
+        if tag in ("b", "strong"):
+            self.bold += 1
 
     def handle_endtag(self, tag):
         if tag in SKIP_TAGS:
@@ -435,30 +499,65 @@ class TextRenderer(html.parser.HTMLParser):
             return
         if tag in BLOCK_TAGS:
             self._flush()
+        if tag in ("ul", "ol"):
+            self.depth = max(0, self.depth - 1)
+            self.chain = [e for e in self.chain if e[0] <= self.depth]
+        if tag in ("b", "strong"):
+            self.bold = max(0, self.bold - 1)
 
     def handle_data(self, data):
         if not self.skip:
             self.buf.append(data)
+            if self.bold:
+                self.bold_buf.append(data)
 
     def lines(self, width=None):
         self._flush()
         width = width or WIDTH
         out = []
-        for bullet, text in self.blocks:
-            if bullet:
-                out.extend(textwrap.wrap(text, width, initial_indent="- ",
-                                         subsequent_indent="  ") or ["-"])
+        prev_chain = None
+        for depth, text, chain in self.blocks:
+            if self.subsections and depth:
+                if chain:
+                    if chain != prev_chain:
+                        # blank line between groups, none between a
+                        # context line and its own blurbs
+                        if out and out[-1] != "":
+                            out.append("")
+                        out.extend(textwrap.wrap(
+                            " › ".join(chain), width,
+                            initial_indent="  ", subsequent_indent="  "))
+                    out.extend(textwrap.wrap(
+                        text, width, initial_indent="  - ",
+                        subsequent_indent="    ") or ["-"])
+                else:
+                    if prev_chain is not None and out and out[-1] != "":
+                        out.append("")
+                    out.extend(textwrap.wrap(
+                        text, width, initial_indent="- ",
+                        subsequent_indent="  ") or ["-"])
+                    out.append("")
+                prev_chain = chain
+            elif depth:
+                head = "  " * (depth - 1) + "- "
+                out.extend(textwrap.wrap(text, width, initial_indent=head,
+                                         subsequent_indent=" " * len(head))
+                           or [head.rstrip()])
+                out.append("")  # blank line between blocks, like w3m -dump
             else:
+                if out and out[-1] != "":
+                    out.append("")
                 out.extend(textwrap.wrap(text, width) or [""])
-            out.append("")  # blank line between blocks, like w3m -dump
+                out.append("")
+                prev_chain = None
         while out and not out[-1]:
             out.pop()
         return out
 
 
-def render_html(html_text):
+def render_html(html_text, subsections=False):
     """HTML string → wrapped plaintext lines."""
-    renderer = TextRenderer()
+    renderer = TextRenderer(subsections=subsections)
     renderer.feed(html_text)
     return renderer.lines()
 
@@ -645,13 +744,21 @@ def src_world(_get=None):
     return rss_section(AJ_FEED, AJ_ITEMS, _get)
 
 
+def src_dw(_get=None):
+    return rss_section(DW_FEED, DW_ITEMS, _get)
+
+
+def src_un(_get=None):
+    return rss_section(UN_FEED, UN_ITEMS, _get)
+
+
 def src_hn(_get=None):
     return rss_section(HN_FEED, HN_ITEMS, _get)
 
 
 def src_events(_get=None):
     doc = (_get or http_get)(PORTAL_URL)
-    lines = render_html(doc)
+    lines = render_html(doc, subsections=True)
     lines = trim_portal(lines)
     lines = strip_furniture(lines)
     lines = day_separators(lines)
@@ -663,6 +770,8 @@ def src_events(_get=None):
 SOURCES = [
     ("npr", "NPR", src_npr),
     ("world", "WORLD", src_world),
+    ("dw", "DEUTSCHE WELLE", src_dw),
+    ("un", "UN NEWS", src_un),
     ("hn", "HACKER NEWS", src_hn),
     ("events", "CURRENT EVENTS", src_events),
 ]
@@ -700,7 +809,7 @@ def via_word():
 def build_edition(day, now, _get=None):
     """Pull every source and assemble the edition.
 
-    Returns (lines, errors, ok_count). The four GETs are anti-fingerprint
+    Returns (lines, errors, ok_count). The six GETs are anti-fingerprint
     shaped: fetch ORDER is shuffled per run (secrets Fisher-Yates — the
     edition still renders in fixed SOURCES order; only the wire order is
     random) and between fetches the pull sleeps a secrets-random

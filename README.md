@@ -11,7 +11,7 @@
 ![python](https://img.shields.io/badge/python-3.8%2B-3776AB?logo=python&logoColor=white)
 ![deps](https://img.shields.io/badge/dependencies-none-44CC11)
 ![tor](https://img.shields.io/badge/tor-socks5h-7E4798)
-![tests](https://img.shields.io/badge/tests-35%20offline-89E051)
+![tests](https://img.shields.io/badge/tests-46%20offline-89E051)
 
 **shinbun** (新聞) is Japanese for "newspaper". It pulls ONE dated 80-column
 plaintext "daily edition" of world news over Tor each morning and reads it
@@ -50,12 +50,22 @@ Second Headline
  WORLD ─────────────────────────────────────────────────────────────────────────
  1. World Stub One
                                                          https://aje.example/one
+
  2. World Stub Two
                                                          https://aje.example/two
+
+ DEUTSCHE WELLE ────────────────────────────────────────────────────────────────
+ 1. DW Stub One
+                                                          https://dw.example/one
+
+ UN NEWS ───────────────────────────────────────────────────────────────────────
+ 1. UN Stub One
+                                                          https://un.example/one
 
  HACKER NEWS ───────────────────────────────────────────────────────────────────
  1. Stub HN One
                                                          https://example.com/one
+
  2. Stub HN Two & more
                                                          https://example.com/two
 
@@ -64,9 +74,11 @@ Topics in the news
 
  ── September 2, 2026 (Wednesday) ──
 
-- A thing happened in a place with some details attached.
+Conflicts and attacks
 
-- Another thing happened elsewhere entirely.
+  A war › A front
+  - A thing happened in a place with some details attached.
+  - Another thing happened elsewhere entirely.
 ```
 
 In a terminal the masthead is bold blue, section rules cyan, and the day
@@ -112,8 +124,10 @@ columns down to 48; anything still too long is clipped rather than wrapped.
 |---|---|---|
 | NPR | text.npr.org index | headlines, each with its short code (`nx-s1-…`) right-locked to column 80 — the `--read` handle |
 | WORLD | Al Jazeera RSS | top 15 numbered title/link pairs, URL right-locked in quiet blue under each, a blank line between items |
+| DEUTSCHE WELLE | DW world RSS | top 10 numbered title/link pairs, same format |
+| UN NEWS | UN News RSS | top 10 numbered title/link pairs, same format |
 | HACKER NEWS | hnrss.org frontpage | top 20 numbered title/link pairs, same format |
-| CURRENT EVENTS | Wikipedia Portal:Current events | the portal render trimmed to the news, each day's date heading wrapped in a yellow rule |
+| CURRENT EVENTS | Wikipedia Portal:Current events | the portal render trimmed to the news, each day's date heading wrapped in a yellow rule, each subsection (Armed conflicts and attacks, …) an unbulleted head, and each blurb's category chain collapsed to a `A › B` breadcrumb with the blurb bulleted under it |
 
 Each source fails soft independently: a dead source marks its section
 `unavailable` and the rest of the edition still renders. Exit status is
@@ -130,6 +144,8 @@ All sources are keyless, and only HTML/RSS text is ever fetched.
 | [NPR text-only](https://text.npr.org/) | headline index + full articles for `--read` |
 | [hnrss.org](https://hnrss.org/) | Hacker News front page as RSS |
 | [Al Jazeera RSS](https://www.aljazeera.com/xml/rss/all.xml) | world headlines |
+| [Deutsche Welle RSS](https://rss.dw.com/xml/rss-en-world) | world headlines |
+| [UN News RSS](https://news.un.org/feed/subscribe/en/news/all/rss.xml) | UN/humanitarian headlines |
 | [Wikipedia Portal:Current events](https://en.wikipedia.org/wiki/Portal:Current_events) | the daily current-events portal, via `action=render` |
 
 ---
@@ -147,7 +163,7 @@ All sources are keyless, and only HTML/RSS text is ever fetched.
   the tool class, never you: no IP, no account, no cookies, no day-to-day
   state. Hiding it would require a browser's TLS stack, which defeats the
   one-file design.
-- **Traffic budget: exactly 4 GETs per edition pull** (one per source), text
+- **Traffic budget: exactly 6 GETs per edition pull** (one per source), text
   only — subresources and images are never fetched. The pulls are shaped
   against correlation: fetch order is shuffled per run (a `secrets`-based
   Fisher-Yates) and between fetches the pull sleeps a random 5–120 s, so the
@@ -211,7 +227,7 @@ unless you pass `--strict`.
 python3 -m unittest test_shinbun -v
 ```
 
-35 tests, all offline. Fetchers are exercised against canned fixtures
+46 tests, all offline. Fetchers are exercised against canned fixtures
 through an injectable getter, so the suite never touches the network; the
 one exception is loopback sockets in the SOCKS5 wire-format test, which runs
 a fake SOCKS server on 127.0.0.1 and asserts the CONNECT request carries

@@ -8,6 +8,7 @@ A test that touches the real network is a regression.
 """
 
 import contextlib
+import gzip
 import io
 import os
 import socket
@@ -48,16 +49,31 @@ AJ_RSS = """<rss><channel><title>Al Jazeera</title>
 <pubDate>d</pubDate></item>
 </channel></rss>"""
 
+DW_RSS = """<rss><channel><title>World | Deutsche Welle</title>
+<item><title>DW Stub One</title><link>https://dw.example/one</link>
+<pubDate>d</pubDate></item>
+</channel></rss>"""
+
+UN_RSS = """<rss><channel><title>UN News</title>
+<item><title>UN Stub One</title><link>https://un.example/one</link>
+<pubDate>d</pubDate></item>
+</channel></rss>"""
+
 # The portal's daily-subpage heading ships NON-BREAKING spaces (&nbsp;),
-# exactly as the real portal emits them.
+# exactly as the real portal emits them. Subsection heads are
+# <p><b>Name</b></p> (NOT list items) and the blurbs under them nest
+# topic/sub-topic <ul>s three deep — the real portal's shape.
 PORTAL_HTML = """<html><head><title>skin junk</title>
 <style>.junk{color:red}</style></head><body>
 <p>Maintenance banner junk above the news</p>
 <h2>Topics in the news</h2>
 <ul><li>edit</li><li>history</li><li>watch</li></ul>
 <h3>September&nbsp;2,&nbsp;2026&nbsp;(2026-09-02) (Wednesday)</h3>
+<p><b>Conflicts and attacks</b></p>
+<ul><li>A war
+<ul><li>A front
 <ul><li>A thing happened in a place with some details attached.</li>
-<li>Another thing happened elsewhere entirely.</li></ul>
+<li>Another thing happened elsewhere entirely.</li></ul></li></ul></li></ul>
 <ul><li>Nominate an article</li></ul>
 <p>More September 2026 events...</p>
 <p>Ongoing events reference junk that must be cut</p>
@@ -79,6 +95,8 @@ FULL_MAP = {
     "https://text.npr.org/": NPR_INDEX_HTML,
     "https://hnrss.org/frontpage?points=100": HN_RSS,
     "https://www.aljazeera.com/xml/rss/all.xml": AJ_RSS,
+    "https://rss.dw.com/xml/rss-en-world": DW_RSS,
+    "https://news.un.org/feed/subscribe/en/news/all/rss.xml": UN_RSS,
     shinbun.PORTAL_URL: PORTAL_HTML,
     ARTICLE_URL: ARTICLE_HTML,
 }
@@ -157,14 +175,19 @@ class TestEdition(ShinbunTestCase):
         self.assertEqual(code, 0, err)
         text = self.edition()
         for marker in ("DAILY EDITION", " NPR ─", " WORLD ─",
+                       " DEUTSCHE WELLE ─", " UN NEWS ─",
                        " HACKER NEWS ─", " CURRENT EVENTS ─"):
             self.assertIn(marker, text)
+        # the canned items made it through the RSS path, not just headers
+        self.assertIn("DW Stub One", text)
+        self.assertIn("UN Stub One", text)
 
     def test_section_order(self):
         self.archive()
         text = self.edition()
         order = [text.index(f" {label} ─") for label in
-                 ("NPR", "WORLD", "HACKER NEWS", "CURRENT EVENTS")]
+                 ("NPR", "WORLD", "DEUTSCHE WELLE", "UN NEWS",
+                  "HACKER NEWS", "CURRENT EVENTS")]
         self.assertEqual(order, sorted(order))
 
     def test_entity_unescape(self):
@@ -201,7 +224,7 @@ class TestEdition(ShinbunTestCase):
         self.assertGreater(shinbun.visible_len(line), 80)
 
     def test_fetch_order_shuffled_and_gaps_widened(self):
-        # fetch order is a secrets-shuffled permutation of the four sources
+        # fetch order is a secrets-shuffled permutation of the six sources
         # (edition RENDER order stays fixed — test_section_order), and the
         # inter-request gaps are FETCH_GAP_MIN + secrets.randbelow(range)
         log = []
@@ -213,17 +236,21 @@ class TestEdition(ShinbunTestCase):
             ["https://text.npr.org/",
              "https://hnrss.org/frontpage?points=100",
              "https://www.aljazeera.com/xml/rss/all.xml",
+             "https://rss.dw.com/xml/rss-en-world",
+             "https://news.un.org/feed/subscribe/en/news/all/rss.xml",
              shinbun.PORTAL_URL]))
         # randbelow drives BOTH the shuffle and the gaps
         self.assertIn(120 - 5 + 1, [c.args[0] for c in rb.call_args_list])
-        # three gaps (4 sources), each FETCH_GAP_MIN + 0 with randbelow at 0
+        # five gaps (6 sources), each FETCH_GAP_MIN + 0 with randbelow at 0
         gaps = [c.args[0] for c in self._sleep.call_args_list]
-        self.assertEqual(gaps, [shinbun.FETCH_GAP_MIN] * 3)
+        self.assertEqual(gaps, [shinbun.FETCH_GAP_MIN] * 5)
         # Fisher-Yates with j=0 always is a fixed rotation — proves the
         # wire order is actually shuffled, not SOURCES order
         self.assertNotEqual(log, ["https://text.npr.org/",
                                   "https://hnrss.org/frontpage?points=100",
                                   "https://www.aljazeera.com/xml/rss/all.xml",
+                                  "https://rss.dw.com/xml/rss-en-world",
+                                  "https://news.un.org/feed/subscribe/en/news/all/rss.xml",
                                   shinbun.PORTAL_URL])
 
     def test_hn_items_numbered(self):
@@ -268,6 +295,23 @@ class TestEdition(ShinbunTestCase):
         self.assertNotIn("reference junk", text)
         self.assertNotIn("Nominate an article", text)
         self.assertNotIn("var junk", text)
+
+    def test_portal_subcategories_render_as_breadcrumbs(self):
+        # subsection heads (<p><b>Name</b></p> in the real markup) render as
+        # unbulleted head lines; an li carrying a nested ul is a CATEGORY
+        # node (never news — the real chains run four deep before any
+        # blurb), so its labels collapse to one "  A › B" breadcrumb with
+        # the leaf blurbs bulleted under it, no blank lines inside a group
+        self.archive()
+        text = self.edition()
+        self.assertIn("\nConflicts and attacks\n", text)
+        self.assertNotIn("- Conflicts and attacks", text)
+        self.assertIn("\n  A war › A front\n", text)
+        self.assertNotIn("- A war", text)
+        self.assertIn("\n  - A thing happened in a place", text)
+        # same-group blurbs stay together — no blank line between them
+        self.assertIn("attached.\n  - Another thing happened", text)
+        self.assertNotIn("\n    -", text)
 
     def test_every_line_fits_width(self):
         self.archive()
@@ -418,6 +462,82 @@ class TestParsing(unittest.TestCase):
                             for l in wrapped))
         self.assertTrue(all(len(l) <= 80 for l in wrapped))
 
+    def test_renderer_nested_lists_indent(self):
+        # a header li carrying a nested ul of blurbs — the header must read
+        # as a level ABOVE its items
+        lines = shinbun.render_html(
+            "<ul><li><b>Conflicts and attacks</b><ul>"
+            "<li>first blurb</li><li>second blurb</li>"
+            "</ul></li><li><b>Disasters</b><ul>"
+            "<li>third blurb</li></ul></li></ul>")
+        self.assertIn("- Conflicts and attacks", lines)
+        self.assertIn("  - first blurb", lines)
+        self.assertIn("  - second blurb", lines)
+        self.assertIn("- Disasters", lines)
+        self.assertIn("  - third blurb", lines)
+
+    def test_renderer_subsections_render_breadcrumb_groups(self):
+        # the portal's REAL shape, verified against the live markup: the
+        # subsection head is <p><b>Name</b></p> (not a list item); an li
+        # carrying a nested ul is a CATEGORY node (chains run four deep
+        # before any blurb), only LEAF lis are news. Heads render
+        # unbulleted, category labels collapse to one "  A › B"
+        # breadcrumb, blurbs bullet under it.
+        lines = shinbun.render_html(
+            "<p><b>Conflicts and attacks</b></p>"
+            "<ul>"
+            "<li>War A<ul><li>Front X<ul>"
+            "<li>blurb one</li><li>blurb two</li></ul></li></ul></li>"
+            "<li>War B<ul><li>blurb three</li></ul></li>"
+            "<li>bare blurb</li>"
+            "</ul>"
+            "<p><b>Disasters</b></p><ul><li>blurb four</li></ul>",
+            subsections=True)
+        self.assertIn("Conflicts and attacks", lines)
+        self.assertNotIn("- Conflicts and attacks", lines)
+        self.assertIn("  War A › Front X", lines)
+        self.assertIn("  War B", lines)
+        self.assertIn("  - blurb one", lines)
+        self.assertIn("  - blurb two", lines)
+        self.assertIn("  - blurb three", lines)
+        self.assertIn("- bare blurb", lines)
+        self.assertIn("Disasters", lines)
+        self.assertIn("- blurb four", lines)
+        # same-group blurbs stay together; a blank line splits groups
+        one = lines.index("  - blurb one")
+        self.assertEqual(lines[one + 1], "  - blurb two")
+        self.assertEqual(lines[one + 2], "")
+        self.assertEqual(lines[one + 3], "  War B")
+        # a sibling category does NOT inherit the previous chain: blurb
+        # three's context is "War B" alone, and a new head drops it all
+        self.assertNotIn("  War A › Front X › War B", lines)
+        self.assertNotIn("  - blurb four", lines)
+        self.assertFalse(any(l.startswith("    -") for l in lines))
+
+    def test_renderer_bold_block_stays_plain_without_subsections(self):
+        # the NPR --read path passes no flag: a standalone bold paragraph is
+        # prose, not a section head — no bullet, no indentation games
+        lines = shinbun.render_html("<p><b>just a bold sentence</b></p>")
+        self.assertIn("just a bold sentence", lines)
+        self.assertNotIn("- just a bold sentence", lines)
+
+    def test_renderer_partially_bold_block_is_not_a_head(self):
+        # bold LINKS inside a blurb must not promote it: only a block whose
+        # ENTIRE text is bold is a subsection head
+        lines = shinbun.render_html(
+            "<p>Some <b>bold</b> words</p>", subsections=True)
+        self.assertIn("Some bold words", lines)
+        self.assertNotIn("- Some bold words", lines)
+
+    def test_renderer_nested_bullets_wrap_with_deeper_hang(self):
+        lines = shinbun.render_html(
+            "<ul><li>header<ul><li>" + "word " * 30 + "</li></ul></li></ul>")
+        wrapped = [l for l in lines if l and "header" not in l]
+        self.assertGreater(len(wrapped), 1)
+        self.assertTrue(all(l.startswith("  - ") or l.startswith("    ")
+                            for l in wrapped))
+        self.assertTrue(all(len(l) <= 80 for l in wrapped))
+
     def test_rss_limits_and_unwraps_cdata(self):
         items = shinbun.parse_rss(HN_RSS, 20)
         self.assertEqual(items[0], ("Stub HN One", "https://example.com/one"))
@@ -436,25 +556,26 @@ class TestParsing(unittest.TestCase):
 class TestJitter(ShinbunTestCase):
 
     def test_jitter_uses_secrets_and_respects_cap(self):
-        # randbelow serves: the pre-pull jitter, then the 3 Fisher-Yates
-        # shuffle draws, then the 3 inter-fetch gap draws
+        # randbelow serves: the pre-pull jitter, then the 5 Fisher-Yates
+        # shuffle draws, then the 5 inter-fetch gap draws
         with mock.patch.object(shinbun.secrets, "randbelow",
-                               side_effect=[42, 0, 0, 0, 2, 2, 2]) as rb:
+                               side_effect=[42, 0, 0, 0, 0, 0,
+                                            2, 2, 2, 2, 2]) as rb:
             code, out, err = self.archive(argv_extra=["--jitter", "10"])
         self.assertEqual(code, 0, err)
         # the pre-pull sleep comes first and is capped at MINUTES*60 + 1
         self.assertEqual(rb.call_args_list[0], mock.call(601))
         self.assertEqual(self._sleep.call_args_list[0], mock.call(42))
-        # the shuffle draws (i = 3, 2, 1)
-        self.assertEqual([c.args[0] for c in rb.call_args_list[1:4]],
-                         [4, 3, 2])
+        # the shuffle draws (i = 5, 4, 3, 2, 1)
+        self.assertEqual([c.args[0] for c in rb.call_args_list[1:6]],
+                         [6, 5, 4, 3, 2])
         # inter-fetch gaps: FETCH_GAP_MIN + randbelow(range), per source
         # after the 1st
         gap_range = shinbun.FETCH_GAP_MAX - shinbun.FETCH_GAP_MIN + 1
-        self.assertEqual([c.args[0] for c in rb.call_args_list[4:]],
-                         [gap_range] * 3)
+        self.assertEqual([c.args[0] for c in rb.call_args_list[6:]],
+                         [gap_range] * 5)
         self.assertEqual([c.args[0] for c in self._sleep.call_args_list[1:]],
-                         [shinbun.FETCH_GAP_MIN + 2] * 3)
+                         [shinbun.FETCH_GAP_MIN + 2] * 5)
 
     def test_jitter_rejected_without_archive(self):
         for argv in (["--jitter", "5"], ["--read", "x", "--jitter", "5"]):
@@ -522,9 +643,10 @@ class FakeSocksServer(threading.Thread):
     """Just enough SOCKS5 to record the handshake and answer one HTTP
     request per accepted connection. Loopback only — no real network."""
 
-    def __init__(self, body=b"hello tor body"):
+    def __init__(self, body=b"hello tor body", extra_headers=b""):
         super().__init__(daemon=True)
         self.body = body
+        self.extra_headers = extra_headers
         self.requests = []  # (atyp, host_bytes, port)
         self.http_requests = []
         self.sock = socket.socket()
@@ -569,7 +691,8 @@ class FakeSocksServer(threading.Thread):
             req += conn.recv(4096)
         self.http_requests.append(req)
         conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
-                     b"Connection: close\r\n\r\n" + self.body)
+                     + self.extra_headers
+                     + b"Connection: close\r\n\r\n" + self.body)
 
     @staticmethod
     def _recv(conn, n):
@@ -612,6 +735,19 @@ class TestSocksWire(ShinbunTestCase):
         self.assertIn(b"GET /news HTTP/1.1", req)
         self.assertIn(b"Host: example.com", req)
         self.assertIn(shinbun.UA.encode(), req)
+
+    def test_gzip_content_encoding_decoded(self):
+        # news.un.org's CDN forces Content-Encoding: gzip regardless of
+        # Accept-Encoding — the client must decode it to get text
+        self.server.close()
+        self.server = FakeSocksServer(
+            body=gzip.compress(b"hello gzipped body"),
+            extra_headers=b"Content-Encoding: gzip\r\n")
+        self.server.start()
+        self.addCleanup(self.server.close)
+        shinbun.SOCKS_PORT = self.server.port
+        self.assertEqual(shinbun.http_get("http://example.com/news"),
+                         "hello gzipped body")
 
 
 # --------------------------------------------------------------------- chunks
